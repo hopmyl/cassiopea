@@ -3,6 +3,10 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+// Мягкий женский голос (выбран по анализу тембра среди моделей SDK)
+const TTS_VOICE = process.env.TTS_VOICE || "xiaochen";
+const TTS_SPEED = Number(process.env.TTS_SPEED || "1.0");
+
 function splitChunks(text: string, max = 950): string[] {
   const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
   const chunks: string[] = [];
@@ -20,7 +24,7 @@ function splitChunks(text: string, max = 950): string[] {
 
 export async function POST(req: NextRequest) {
   try {
-    const { text } = await req.json();
+    const { text, voice, speed } = await req.json();
     if (!text || typeof text !== "string") {
       return NextResponse.json({ error: "text required" }, { status: 400 });
     }
@@ -31,8 +35,8 @@ export async function POST(req: NextRequest) {
     for (const chunk of chunks) {
       const res = await zai.audio.tts.create({
         input: chunk,
-        voice: "tongtong",
-        speed: 1.0,
+        voice: typeof voice === "string" && voice ? voice : TTS_VOICE,
+        speed: typeof speed === "number" && speed >= 0.5 && speed <= 2 ? speed : TTS_SPEED,
         response_format: "wav",
         stream: false,
       });

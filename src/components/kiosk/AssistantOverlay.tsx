@@ -69,26 +69,9 @@ export default function AssistantOverlay({
       .replace(/₽/g, " рублей")
       .replace(/Cassiopea/gi, "Кассиопеа")
       .replace(/I'm Cassiopea/gi, "Ай эм Кассиопеа");
-    // Приоритет: встроенный синтез планшета
+    // Приоритет: серверная женская модель (мягкий тембр)
+    setPhase("speaking");
     try {
-      if (typeof window !== "undefined" && window.speechSynthesis) {
-        const u = new SpeechSynthesisUtterance(spoken);
-        u.lang = "ru-RU";
-        const voices = window.speechSynthesis.getVoices();
-        const ru = voices.find((v) => v.lang?.toLowerCase().startsWith("ru"));
-        if (ru) u.voice = ru;
-        u.rate = 1;
-        u.pitch = 1;
-        u.onend = () => setPhase("idle");
-        u.onerror = () => setPhase("idle");
-        setPhase("speaking");
-        window.speechSynthesis.speak(u);
-        return;
-      }
-    } catch {}
-    // Резерв: серверный TTS
-    try {
-      setPhase("speaking");
       const res = await fetch("/api/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -103,10 +86,33 @@ export default function AssistantOverlay({
         setPhase("idle");
         URL.revokeObjectURL(url);
       };
+      audioElRef.current.onerror = () => setPhase("idle");
       await audioElRef.current.play();
-    } catch {
-      setPhase("idle");
-    }
+      return;
+    } catch {}
+    // Резерв: встроенный синтез планшета (выбираем женский русский голос)
+    try {
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        const u = new SpeechSynthesisUtterance(spoken);
+        u.lang = "ru-RU";
+        const voices = window.speechSynthesis.getVoices();
+        const ru = voices.filter((v) => v.lang?.toLowerCase().startsWith("ru"));
+        // предпочитаем женские голоса по типичным именам
+        const femaleHints = ["milena", "alyona", "alena", "katya", "ekaterina", "irina", "female", "женск", "tatyana", "svetlana", "google"];
+        const female =
+          ru.find((v) => femaleHints.some((h) => v.name.toLowerCase().includes(h))) ||
+          ru.find((v) => !/male|мужск|pavel|yuri|dmitri|artem/i.test(v.name));
+        if (female) u.voice = female;
+        else if (ru.length) u.voice = ru[0];
+        u.rate = 1;
+        u.pitch = 1.1;
+        u.onend = () => setPhase("idle");
+        u.onerror = () => setPhase("idle");
+        window.speechSynthesis.speak(u);
+        return;
+      }
+    } catch {}
+    setPhase("idle");
   }, []);
 
   const stopSpeaking = useCallback(() => {

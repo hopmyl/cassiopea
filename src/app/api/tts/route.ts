@@ -4,14 +4,15 @@ import { promises as fsp, accessSync, constants as fsConstants } from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
+import { edgeTtsSynthesize, resolveVoiceName, KIOSK_VOICE } from "@/lib/edge-tts";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-// Провайдер озвучки: "edge" (нейроголоса Microsoft, отличная русская речь)
-// или "zai" (голоса z-ai SDK — русский не поддерживают, оставлено как legacy)
+// Провайдер озвучки: "edge" (нейроголоса Microsoft — русский и английский,
+// выбранный заказчиком голос en-US-EmmaMultilingualNeural) или "zai" (legacy z-ai SDK).
 const TTS_PROVIDER = process.env.TTS_PROVIDER || "edge";
-const TTS_VOICE = process.env.TTS_VOICE || "ru-RU-SvetlanaNeural";
+const TTS_VOICE = resolveVoiceName(process.env.TTS_VOICE || KIOSK_VOICE);
 // Темп речи: "+0%" — естественный, можно замедлить ("-6%") для мягкости
 const TTS_RATE = process.env.TTS_RATE || "+0%";
 
@@ -30,33 +31,33 @@ function splitChunks(text: string, max = 900): string[] {
   return chunks;
 }
 
-// Бинарь edge-tts может лежать вне PATH процесса dev-сервера — ищем по кандидатам
+// Аварийный резерв: python-бинарник edge-tts (если WebSocket-путь недоступен).
+// Бинарь может лежать вне PATH процесса dev-сервера — ищем по кандидатам.
 const EDGE_CANDIDATES = [
   process.env.EDGE_TTS_BIN,
   "/home/z/.venv/bin/edge-tts",
   "/usr/local/bin/edge-tts",
   "/usr/bin/edge-tts",
 ].filter(Boolean) as string[];
-let edgeBin: string | null = null;
-function edgeBinPath(): string {
-  if (edgeBin) return edgeBin;
+
+function edgeBinPath(): string | null {
   for (const c of EDGE_CANDIDATES) {
     try {
       accessSync(c, fsConstants.X_OK);
-      edgeBin = c;
       return c;
     } catch {}
   }
-  edgeBin = "edge-tts"; // последний шанс — PATH
-  return edgeBin;
+  return null;
 }
 
-async function edgeTts(text: string, voice: string, rate: string): Promise<Buffer> {
+async function edgeTtsCli(text: string, voice: string, rate: string): Promise<Buffer> {
+  const bin = edgeBinPath();
+  if (!bin) throw new Error("edge-tts binary not found");
   const tmp = path.join(os.tmpdir(), `tts_${randomUUID()}.mp3`);
   try {
     await new Promise<void>((resolve, reject) => {
       execFile(
-        edgeBinPath(),
+        bin,
         ["--voice", voice, "--rate", rate, "--text", text, "--write-media", tmp],
         { timeout: 60_000 },
         (err) => (err ? reject(err) : resolve()),
@@ -65,6 +66,18 @@ async function edgeTts(text: string, voice: string, rate: string): Promise<Buffe
     return await fsp.readFile(tmp);
   } finally {
     fsp.unlink(tmp).catch(() => {});
+  }
+}
+
+// Основной путь — WebSocket-клиент (работает на любом Node-хосте),
+// при сбое — python-бинарник как резерв.
+async function edgeTts(text: string, voice: string, rate: string): Promise<Buffer> {
+  try {
+    const ab = await edgeTtsSynthesize(text, voice, { rate });
+    return Buffer.from(ab);
+  } catch (err) {
+    if (edgeBinPath()) return edgeTtsCli(text, voice, rate);
+    throw err;
   }
 }
 
@@ -104,7 +117,10 @@ export async function POST(req: NextRequest) {
     }
 
     // Edge neural voices (default)
-    const v = typeof voice === "string" && voice && !voice.startsWith("zai_") ? voice : TTS_VOICE;
+    const v =
+      typeof voice === "string" && voice && !voice.startsWith("zai_")
+        ? resolveVoiceName(voice)
+        : TTS_VOICE;
     const r = typeof rate === "string" && /^[-+]\d+%$/.test(rate) ? rate : TTS_RATE;
     for (const chunk of chunks) {
       buffers.push(await edgeTts(chunk, v, r));

@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Mic, X, Volume2, VolumeX, Send, Sparkles } from "lucide-react";
 import { bySlug } from "@/lib/catalog";
 import type { AssistantAction } from "@/lib/assistant-engine";
+import { edgeTtsSynthesize, KIOSK_VOICE } from "@/lib/edge-tts";
 import { Sparkle } from "./Sparkle";
 
 type Phase = "idle" | "listening" | "thinking" | "speaking";
@@ -60,6 +61,28 @@ export default function AssistantOverlay({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [msgs, phase, interim]);
 
+  const playBlob = useCallback(
+    (blob: Blob) =>
+      new Promise<void>((resolve, reject) => {
+        const url = URL.createObjectURL(blob);
+        if (!audioElRef.current) audioElRef.current = new Audio();
+        const a = audioElRef.current;
+        a.src = url;
+        a.onended = () => {
+          setPhase("idle");
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        a.onerror = () => {
+          setPhase("idle");
+          URL.revokeObjectURL(url);
+          reject(new Error("audio error"));
+        };
+        a.play().catch(reject);
+      }),
+    [],
+  );
+
   const speak = useCallback(async (text: string) => {
     if (mutedRef.current) return;
     try {
@@ -69,7 +92,7 @@ export default function AssistantOverlay({
       .replace(/₽/g, " рублей")
       .replace(/Cassiopea/gi, "Кассиопеа")
       .replace(/I'm Cassiopea/gi, "Ай эм Кассиопеа");
-    // Приоритет: серверная женская модель (мягкий тембр)
+    // Приоритет: серверный Edge TTS — голос Emma (выбран заказчиком)
     setPhase("speaking");
     try {
       const res = await fetch("/api/tts", {
@@ -78,19 +101,17 @@ export default function AssistantOverlay({
         body: JSON.stringify({ text: spoken.slice(0, 950) }),
       });
       if (!res.ok) throw new Error("tts failed");
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      if (!audioElRef.current) audioElRef.current = new Audio();
-      audioElRef.current.src = url;
-      audioElRef.current.onended = () => {
-        setPhase("idle");
-        URL.revokeObjectURL(url);
-      };
-      audioElRef.current.onerror = () => setPhase("idle");
-      await audioElRef.current.play();
+      await playBlob(await res.blob());
       return;
     } catch {}
-    // Резерв: встроенный синтез планшета (выбираем женский русский голос)
+    // Резерв 1: прямое подключение к Edge TTS из браузера — тот же голос Emma,
+    // работает даже если сервер недоступен (статический хостинг, сбой API).
+    try {
+      const ab = await edgeTtsSynthesize(spoken.slice(0, 900), KIOSK_VOICE, { rate: "+0%" });
+      await playBlob(new Blob([ab], { type: "audio/mpeg" }));
+      return;
+    } catch {}
+    // Резерв 2: встроенный синтез планшета (выбираем женский русский голос)
     try {
       if (typeof window !== "undefined" && window.speechSynthesis) {
         const u = new SpeechSynthesisUtterance(spoken);
@@ -113,7 +134,7 @@ export default function AssistantOverlay({
       }
     } catch {}
     setPhase("idle");
-  }, []);
+  }, [playBlob]);
 
   const stopSpeaking = useCallback(() => {
     try {
